@@ -32,7 +32,7 @@ def load_sents(path):
 
 
 def load_data(path, tokenizer, BOS_token=None):
-    # todo: add dataloader here, with tokenizer map
+    # todo: add dataloader here, with correct tokenizer map
     with open(path) as f:
         lines = f.readlines()
     lines = [line.strip() for line in lines]
@@ -89,7 +89,7 @@ def load_data(path, tokenizer, BOS_token=None):
         else:
             data.append([[BOS_token] + word_pieces, action_ngram_seq])
 
-    return data
+    return data # return dataset object
 
 
 if __name__ == "__main__":
@@ -123,18 +123,22 @@ if __name__ == "__main__":
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
     # Set random seed
+    # todo: this can be likely be replaced by enable_determinism
     RANDOM_SEED = args.seed if args.seed is not None else int(np.random.random()*10000)
     torch.manual_seed(RANDOM_SEED)
     random.seed(RANDOM_SEED)
     np.random.seed(RANDOM_SEED)
     print('Random seed: {}'.format(RANDOM_SEED), file=sys.stderr)
 
+    # todo: this needs to be done using a correct dataloader
     # load action ngram list and initialize embeddings
     with open('bllip-lg_action_ngram_list.txt') as f:
         lines = f.readlines()
     symbols = ['<pad>', '_'] + [line.strip().split()[0] for line in lines]
 
     # Initialize the model
+    # todo: use a proper config file from gpt2_config = GPT2Config(len(self.tokenizer)) and use it to init the model
+    # todo: separate here whether the model is "from_pretrained" or "normal init"
     sclm = ScLM(is_random_init=args.random_init, action_ngram_list=symbols, device=device, model_name='gpt2')
     w_boundary_char = sclm.w_boundary_char
 
@@ -178,10 +182,9 @@ if __name__ == "__main__":
 
         training_args = TrainingArguments(
             output_dir=MODEL_PATH,
-            logging_dir=f"{output_dir}/{model_name}/{data_seed}",
-            per_device_train_batch_size=10,
-            gradient_accumulation_steps=10,
-            gradient_checkpointing=True,
+            logging_dir=MODEL_PATH,
+            per_device_train_batch_size=args.batch_size,
+            #gradient_checkpointing=True,
             do_train=True,
             lr_scheduler_type="constant",
             num_train_epochs=args.epochs,
@@ -196,75 +199,78 @@ if __name__ == "__main__":
         trainer = Trainer(
             model=model,
             args=training_args,
-            train_dataset=dataset_tk_train,
-            eval_dataset=dataset_tk_test,
-            compute_metrics=compute_metrics_pretraining,
-            tokenizer=tokenizer,
+            train_dataset=train_lines,
+            eval_dataset=dev_lines,
+            tokenizer=sclm.tokenizer,
             optimizers=(AdamW(sclm.parameters(), lr=args.lr), None),
         )
 
-        starting_epoch = checkpoint['epoch'] + 1 if (args.restore_from is not None) else 0
-        no_improvement_count = checkpoint['no_improvement_count'] if (args.restore_from is not None) else 0
+        # todo: Starting epoch should be useless once checkpointing fits the correct format
+        #starting_epoch = checkpoint['epoch'] + 1 if (args.restore_from is not None) else 0
+
+        # Not sure what this is for
+        #no_improvement_count = checkpoint['no_improvement_count'] if (args.restore_from is not None) else 0
 
 
         trainer.train()
-        # need to add regular sampling, early stopping using EarlyStoppingCallback 
-        #early_stopping_counter = utils.EarlyStopping(best_validation_loss=best_validation_loss, no_improvement_count=no_improvement_count, threshold=args.early_stopping_threshold)
+        # todo: need to add regular sampling, early stopping using EarlyStoppingCallback 
+        # early_stopping_counter = utils.EarlyStopping(best_validation_loss=best_validation_loss, no_improvement_count=no_improvement_count, threshold=args.early_stopping_threshold)
 
-    if args.do_test:
-        sclm.eval()
-        if args.test_data is None:
-            raise ValueError('Test data not specified')
+    if False: # todo: update - could possibly work as is, but will need to fit the lib better
+        if args.do_test:
+            sclm.eval()
+            if args.test_data is None:
+                raise ValueError('Test data not specified')
 
-        test_data_path = args.test_data
+            test_data_path = args.test_data
 
-        test_sents = []
-        lines = load_sents(args.test_data)
-        for line in lines:
-            tokens = line.split()
-            words = [token for token in tokens if not is_nonterminal(token)]
-            test_sents.append(' '.join(words))
+            test_sents = []
+            lines = load_sents(args.test_data)
+            for line in lines:
+                tokens = line.split()
+                words = [token for token in tokens if not is_nonterminal(token)]
+                test_sents.append(' '.join(words))
 
-        with torch.no_grad():
-            ppl = sclm.get_word_ppl(test_sents)
-        print('PPL: {}'.format(ppl))
-
-    # Estimate token surprisal values for unparsed sentences
-    if args.do_eval:
-        sclm.eval()
-
-        if args.fpath is not None:
-            sents = load_sents(args.fpath)
-        else:
-            sents = ["The dogs under the tree are barking.", "The dogs under the tree is barking.",
-                    "The keys to the cabinet are on the table.", "The keys to the cabinet is on the table.",]
-
-        print('sentence_id\ttoken_id\ttoken\tsurprisal')
-
-        for i, sent in enumerate(sents):
-            if args.pretokenized:
-                words = sent.strip().split()
-                stimulus = sent.strip()
-            else:
-                words = nltk.word_tokenize(sent.strip())
-                stimulus = ' '.join(words)
-
-            tokens = sclm.tokenizer.tokenize(stimulus)
             with torch.no_grad():
-                surprisals = sclm.get_surprisals(tokens, add_bos_token=True)
+                ppl = sclm.get_word_ppl(test_sents)
+            print('PPL: {}'.format(ppl))
 
-            index = 0
-            for j, word in enumerate(words):
-                w_str = ''
-                w_surprisal = 0
-                while index < len(tokens) and w_str != word:
-                    token_str = tokens[index]
-                    if token_str.startswith(w_boundary_char):
-                        w_str += token_str[1:]
-                    else:
-                        w_str += token_str
-                    w_surprisal += surprisals[index]
+        # Estimate token surprisal values for unparsed sentences
+        if args.do_eval:
+            sclm.eval()
 
-                    index += 1
+            if args.fpath is not None:
+                sents = load_sents(args.fpath)
+            else:
+                sents = ["The dogs under the tree are barking.", "The dogs under the tree is barking.",
+                        "The keys to the cabinet are on the table.", "The keys to the cabinet is on the table.",]
 
-                print('{}\t{}\t{}\t{}'.format(i+1, j+1, word, w_surprisal))
+            print('sentence_id\ttoken_id\ttoken\tsurprisal')
+
+            for i, sent in enumerate(sents):
+                if args.pretokenized:
+                    words = sent.strip().split()
+                    stimulus = sent.strip()
+                else:
+                    words = nltk.word_tokenize(sent.strip())
+                    stimulus = ' '.join(words)
+
+                tokens = sclm.tokenizer.tokenize(stimulus)
+                with torch.no_grad():
+                    surprisals = sclm.get_surprisals(tokens, add_bos_token=True)
+
+                index = 0
+                for j, word in enumerate(words):
+                    w_str = ''
+                    w_surprisal = 0
+                    while index < len(tokens) and w_str != word:
+                        token_str = tokens[index]
+                        if token_str.startswith(w_boundary_char):
+                            w_str += token_str[1:]
+                        else:
+                            w_str += token_str
+                        w_surprisal += surprisals[index]
+
+                        index += 1
+
+                    print('{}\t{}\t{}\t{}'.format(i+1, j+1, word, w_surprisal))
