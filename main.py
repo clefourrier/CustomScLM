@@ -1,22 +1,21 @@
-from modeling_sclm import ScLM
+from datasets import load_dataset, Dataset
 from torch.optim import AdamW
-from transformers import TrainingArguments, Trainer
-#from configuration_sclm import ScLMConfig # todo, useless for now
-
 from tokenizers import Tokenizer
 from tokenizers.models import WordLevel
 from tokenizers.trainers import WordLevelTrainer
 from tokenizers.pre_tokenizers import Whitespace
-from transformers import PreTrainedTokenizerFast
-from datasets import load_dataset, Dataset
+from transformers import TrainingArguments, Trainer, enable_determinism
 
+from configuration_sclm import ScLMConfig  # todo, useless for now
+from modeling_sclm import ScLM
+from utils import TrainerWithEvalLoss
 
 
 def is_nonterminal(token):
     """
     Check if a token is a nonterminal action or word piece token.
     """
-    if (token.startswith('NT(') and token.endswith(')')) or token == 'REDUCE()':
+    if (token.startswith("NT(") and token.endswith(")")) or token == "REDUCE()":
         return True
     else:
         return False
@@ -27,7 +26,7 @@ def load_sents(path):
     with open(path) as f:
         lines = f.readlines()
     lines = [line.strip() for line in lines]
-    lines = [line for line in lines if line != '']
+    lines = [line for line in lines if line != ""]
     return lines
 
 
@@ -36,7 +35,7 @@ def load_data(path, tokenizer, BOS_token=None):
     with open(path) as f:
         lines = f.readlines()
     lines = [line.strip() for line in lines]
-    lines = [line for line in lines if line != '']
+    lines = [line for line in lines if line != ""]
 
     data = []
 
@@ -50,18 +49,20 @@ def load_data(path, tokenizer, BOS_token=None):
                 action_seq.append(token)
             else:
                 if action_seq != []:
-                    action_ngrams.append('_'.join(action_seq))
+                    action_ngrams.append("_".join(action_seq))
                     action_seq = []
                 else:
-                    action_ngrams.append('_')
+                    action_ngrams.append("_")
                 words.append(token)
 
-        action_ngrams.append('_'.join(action_seq)) # add the action ngram that comes after the last word
+        action_ngrams.append(
+            "_".join(action_seq)
+        )  # add the action ngram that comes after the last word
 
-        sent = ' '.join(words)
+        sent = " ".join(words)
         word_pieces = tokenizer.tokenize(sent)
 
-        combined = ''
+        combined = ""
         n_piece = 0
         word_index = 0
         action_ngram_seq = []
@@ -73,11 +74,13 @@ def load_data(path, tokenizer, BOS_token=None):
                 combined += piece
             n_piece += 1
             if combined == words[word_index]:
-                action_ngram_seq += [action_ngrams[word_index]] + ['_' for _ in range(n_piece-1)]
-                combined = ''
+                action_ngram_seq += [action_ngrams[word_index]] + [
+                    "_" for _ in range(n_piece - 1)
+                ]
+                combined = ""
                 n_piece = 0
                 word_index += 1
-        assert combined == ''
+        assert combined == ""
         assert word_index == len(words)
 
         action_ngram_seq.append(action_ngrams[-1])
@@ -89,138 +92,192 @@ def load_data(path, tokenizer, BOS_token=None):
         else:
             data.append([[BOS_token] + word_pieces, action_ngram_seq])
 
-    return data # return dataset object
+    return data  # return dataset object
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument('--train_data', type=str, help='Path to training data.')
-    parser.add_argument('--dev_data', type=str, help='Path to validation data.')
-    parser.add_argument('--test_data', type=str, help='Path to test data.')
-    parser.add_argument('--fpath', type=str, help='File path for estimating surprisals.')
-    parser.add_argument('--lr', type=float, default=1e-5, help='Learning rate.')
-    parser.add_argument('--alpha', type=float, default=0.5, help='Hyerparameter in (0, 1) for weighting the structure prediction loss against the word prediction loss. Default is 0.5.')
-    parser.add_argument('--scaffold_type', type=str, help='Type of scaffold. (next, past)')
-    parser.add_argument('--epochs', type=int, default=10, help='Number of training epochs.')
-    parser.add_argument('--report', type=int, default=1000, help='Frequency of report training status after number of training batches.')
-    parser.add_argument('--valid_every', type=int, default=None, help='Frequency of validating and saving model parameters after number of training batches.')
-    parser.add_argument('--sample_every', type=int, default=10000, help='Frequency of generating samples from the model during training.')
-    parser.add_argument('--seed', type=int, default=None, help='Random seed.')
-    parser.add_argument('--do_train', action='store_true', help='Whether to train the model.')
-    parser.add_argument('--do_test', action='store_true', help='Whether to test the model.')
-    parser.add_argument('--do_eval', action='store_true', help='Whether to use the model for surprisal estimation.')
-    parser.add_argument('--model_path', type=str, default=None, help='Path of the model to be trained and saved.')
-    parser.add_argument('--restore_from', type=str, default=None, help='Path to the trained model checkpoint. Will use the pretrained model if path not specified.')
-    parser.add_argument('--batch_size', type=int, default=5, help="Size of a training batch.")
-    parser.add_argument('--early_stopping_threshold', type=int, default=2, help='Threshold for early stopping.')
-    parser.add_argument('--random_init', action='store_true', help="Randomly initialize model parameters.")
-    parser.add_argument('--pretokenized', action='store_true', help="Whether input sentences for evaluating surprisals are pertokenized or not.")
+    parser.add_argument("--train_data", type=str, help="Path to training data.")
+    parser.add_argument("--dev_data", type=str, help="Path to validation data.")
+    parser.add_argument("--test_data", type=str, help="Path to test data.")
+    parser.add_argument(
+        "--fpath", type=str, help="File path for estimating surprisals."
+    )
+    parser.add_argument("--lr", type=float, default=1e-5, help="Learning rate.")
+    parser.add_argument(
+        "--alpha",
+        type=float,
+        default=0.5,
+        help="Hyerparameter in (0, 1) for weighting the structure prediction loss against the word prediction loss. Default is 0.5.",
+    )
+    parser.add_argument(
+        "--scaffold_type", type=str, help="Type of scaffold. (next, past)"
+    )
+    parser.add_argument(
+        "--epochs", type=int, default=10, help="Number of training epochs."
+    )
+    parser.add_argument(
+        "--report",
+        type=int,
+        default=1000,
+        help="Frequency of report training status after number of training batches.",
+    )
+    parser.add_argument(
+        "--valid_every",
+        type=int,
+        default=None,
+        help="Frequency of validating and saving model parameters after number of training batches.",
+    )
+    parser.add_argument(
+        "--sample_every",
+        type=int,
+        default=10000,
+        help="Frequency of generating samples from the model during training.",
+    )
+    parser.add_argument("--seed", type=int, default=None, help="Random seed.")
+    parser.add_argument(
+        "--do_train", action="store_true", help="Whether to train the model."
+    )
+    parser.add_argument(
+        "--do_test", action="store_true", help="Whether to test the model."
+    )
+    parser.add_argument(
+        "--do_eval",
+        action="store_true",
+        help="Whether to use the model for surprisal estimation.",
+    )
+    parser.add_argument(
+        "--model_path",
+        type=str,
+        default=None,
+        help="Path of the model to be trained and saved.",
+    )
+    parser.add_argument(
+        "--restore_from",
+        type=str,
+        default=None,
+        help="Path to the trained model checkpoint. Will use the pretrained model if path not specified.",
+    )
+    parser.add_argument(
+        "--batch_size", type=int, default=5, help="Size of a training batch."
+    )
+    parser.add_argument(
+        "--early_stopping_threshold",
+        type=int,
+        default=2,
+        help="Threshold for early stopping.",
+    )
+    parser.add_argument(
+        "--random_init",
+        action="store_true",
+        help="Randomly initialize model parameters.",
+    )
+    parser.add_argument(
+        "--pretokenized",
+        action="store_true",
+        help="Whether input sentences for evaluating surprisals are pertokenized or not.",
+    )
 
     args = parser.parse_args()
 
-    log_softmax = torch.nn.LogSoftmax(-1)
-
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    device = "cuda" if torch.cuda.is_available() else "cpu"
 
     # Set random seed
-    # todo: this can be likely be replaced by enable_determinism
-    RANDOM_SEED = args.seed if args.seed is not None else int(np.random.random()*10000)
-    torch.manual_seed(RANDOM_SEED)
-    random.seed(RANDOM_SEED)
-    np.random.seed(RANDOM_SEED)
-    print('Random seed: {}'.format(RANDOM_SEED), file=sys.stderr)
+    RANDOM_SEED = (
+        args.seed if args.seed is not None else int(np.random.random() * 10000)
+    )
+    enable_determinism(RANDOM_SEED)
+    print("Random seed: {}".format(RANDOM_SEED), file=sys.stderr)
 
-    # todo: this needs to be done using a correct dataloader
+    # Data loading not working!
+    # todo: this needs to be done using a correct dataloader, but I need to have test files for this
     # load action ngram list and initialize embeddings
-    with open('bllip-lg_action_ngram_list.txt') as f:
+    with open("bllip-lg_action_ngram_list.txt") as f:
         lines = f.readlines()
-    symbols = ['<pad>', '_'] + [line.strip().split()[0] for line in lines]
+    symbols = ["<pad>", "_"] + [line.strip().split()[0] for line in lines]
 
     # Initialize the model
-    # todo: use a proper config file from gpt2_config = GPT2Config(len(self.tokenizer)) and use it to init the model
-    # todo: separate here whether the model is "from_pretrained" or "normal init"
-    sclm = ScLM(is_random_init=args.random_init, action_ngram_list=symbols, device=device, model_name='gpt2')
+    sclm_config = ScLMConfig(
+        is_random_init=args.random_init,
+        action_ngram_list=symbols,
+        model_name="gpt2",
+        cache_dir="pretrained/gpt2",
+    )
+    sclm = ScLM(sclm_config).to(device)
+
     w_boundary_char = sclm.w_boundary_char
 
-    # Load model checkpoint
-    if args.restore_from is not None:
-        print('Load parameters from {}'.format(args.restore_from), file=sys.stderr)
-        checkpoint = torch.load(args.restore_from)
-        sclm.model.load_state_dict(checkpoint['model_state_dict'])
-
-    SCAFFOLD_TYPE = args.scaffold_type
-    print('Scaffold type: {}'.format(SCAFFOLD_TYPE), file=sys.stderr)
-    ALPHA = args.alpha
-    print('Interpolation weight of structure prediction loss {}'.format(ALPHA), file=sys.stderr)
+    print("Scaffold type: {}".format(args.scaffold_type), file=sys.stderr)
+    print(
+        "Interpolation weight of structure prediction loss {}".format(args.alpha),
+        file=sys.stderr,
+    )
 
     # Train
     if args.do_train:
         # Path to save the newly trained model
-        MODEL_PATH = args.model_path if args.model_path is not None else "sclm-{}_pid{}.params".format(SCAFFOLD_TYPE, os.getpid())
+        MODEL_PATH = (
+            args.model_path
+            if args.model_path is not None
+            else "sclm-{}_pid{}.params".format(args.scaffold_type, os.getpid())
+        )
         # print out training settings
-        print('Training batch size: {}'.format(args.batch_size), file=sys.stderr)
-        print('Learning rate: {}'.format(args.lr), file=sys.stderr)
-        print('Model path: {}'.format(MODEL_PATH), file=sys.stderr)
+        print("Training batch size: {}".format(args.batch_size), file=sys.stderr)
+        print("Learning rate: {}".format(args.lr), file=sys.stderr)
+        print("Model path: {}".format(MODEL_PATH), file=sys.stderr)
 
         # Load train and dev data
         train_data_path = args.train_data
         dev_data_path = args.dev_data
         print("Loading train data from {}".format(train_data_path), file=sys.stderr)
-        train_lines = load_data(train_data_path, sclm.tokenizer, BOS_token=sclm.tokenizer.bos_token)
+        train_lines = load_data(
+            train_data_path, sclm.tokenizer, BOS_token=sclm.tokenizer.bos_token
+        )
         print("Loading dev data from {}".format(dev_data_path), file=sys.stderr)
-        dev_lines = load_data(dev_data_path, sclm.tokenizer, BOS_token=sclm.tokenizer.bos_token)
-
-        if args.restore_from is not None:
-            sclm.eval()
-            with torch.no_grad():
-                validation_loss, _, _ = sclm.get_validation_loss(dev_lines, scaffold_type=SCAFFOLD_TYPE)
-            best_validation_loss = validation_loss
-            sclm.train()
-            print('resume training; validation loss: {}'.format(best_validation_loss))
-        else:
-            best_validation_loss = np.inf
+        dev_lines = load_data(
+            dev_data_path, sclm.tokenizer, BOS_token=sclm.tokenizer.bos_token
+        )
 
         training_args = TrainingArguments(
             output_dir=MODEL_PATH,
             logging_dir=MODEL_PATH,
             per_device_train_batch_size=args.batch_size,
-            #gradient_checkpointing=True,
+            # gradient_checkpointing=True,
             do_train=True,
             lr_scheduler_type="constant",
             num_train_epochs=args.epochs,
-            evaluation_strategy="steps" if ((args.valid_every is None) or (args.valid_every < 1)) else "no",
-        	eval_steps=args.valid_every,
+            evaluation_strategy="steps"
+            if ((args.valid_every is None) or (args.valid_every < 1))
+            else "no",
+            eval_steps=args.valid_every,
             logging_strategy="steps",
             loggging_steps=args.report,
             save_strategy="epoch",
         )
-        print(training_args.device)
 
-        trainer = Trainer(
+        trainer = TrainerWithEvalLoss(  # or Trainer
             model=model,
             args=training_args,
-            train_dataset=train_lines,
-            eval_dataset=dev_lines,
+            train_dataset=train_lines,  # todo: replace by correct files if needed!
+            eval_dataset=dev_lines,  # todo: replace by correct files if needed!
             tokenizer=sclm.tokenizer,
             optimizers=(AdamW(sclm.parameters(), lr=args.lr), None),
         )
 
-        # todo: Starting epoch should be useless once checkpointing fits the correct format
-        #starting_epoch = checkpoint['epoch'] + 1 if (args.restore_from is not None) else 0
+        if args.restore_from is not None:
+            trainer.train(resume_from_checkpoint=args.restore_from)
+        else:
+            trainer.train()
 
-        # Not sure what this is for
-        #no_improvement_count = checkpoint['no_improvement_count'] if (args.restore_from is not None) else 0
-
-
-        trainer.train()
-        # todo: need to add regular sampling, early stopping using EarlyStoppingCallback 
+        # todo: need to add regular sampling and early stopping using EarlyStoppingCallback
         # early_stopping_counter = utils.EarlyStopping(best_validation_loss=best_validation_loss, no_improvement_count=no_improvement_count, threshold=args.early_stopping_threshold)
 
-    if False: # todo: update - could possibly work as is, but will need to fit the lib better
+    if False:  # todo: update - could possibly work as is, but will need to fit the lib better
+        # redefine compute_metrics() ?
         if args.do_test:
             sclm.eval()
             if args.test_data is None:
-                raise ValueError('Test data not specified')
+                raise ValueError("Test data not specified")
 
             test_data_path = args.test_data
 
@@ -229,11 +286,11 @@ if __name__ == "__main__":
             for line in lines:
                 tokens = line.split()
                 words = [token for token in tokens if not is_nonterminal(token)]
-                test_sents.append(' '.join(words))
+                test_sents.append(" ".join(words))
 
             with torch.no_grad():
                 ppl = sclm.get_word_ppl(test_sents)
-            print('PPL: {}'.format(ppl))
+            print("PPL: {}".format(ppl))
 
         # Estimate token surprisal values for unparsed sentences
         if args.do_eval:
@@ -242,10 +299,14 @@ if __name__ == "__main__":
             if args.fpath is not None:
                 sents = load_sents(args.fpath)
             else:
-                sents = ["The dogs under the tree are barking.", "The dogs under the tree is barking.",
-                        "The keys to the cabinet are on the table.", "The keys to the cabinet is on the table.",]
+                sents = [
+                    "The dogs under the tree are barking.",
+                    "The dogs under the tree is barking.",
+                    "The keys to the cabinet are on the table.",
+                    "The keys to the cabinet is on the table.",
+                ]
 
-            print('sentence_id\ttoken_id\ttoken\tsurprisal')
+            print("sentence_id\ttoken_id\ttoken\tsurprisal")
 
             for i, sent in enumerate(sents):
                 if args.pretokenized:
@@ -253,7 +314,7 @@ if __name__ == "__main__":
                     stimulus = sent.strip()
                 else:
                     words = nltk.word_tokenize(sent.strip())
-                    stimulus = ' '.join(words)
+                    stimulus = " ".join(words)
 
                 tokens = sclm.tokenizer.tokenize(stimulus)
                 with torch.no_grad():
@@ -261,7 +322,7 @@ if __name__ == "__main__":
 
                 index = 0
                 for j, word in enumerate(words):
-                    w_str = ''
+                    w_str = ""
                     w_surprisal = 0
                     while index < len(tokens) and w_str != word:
                         token_str = tokens[index]
@@ -273,4 +334,4 @@ if __name__ == "__main__":
 
                         index += 1
 
-                    print('{}\t{}\t{}\t{}'.format(i+1, j+1, word, w_surprisal))
+                    print("{}\t{}\t{}\t{}".format(i + 1, j + 1, word, w_surprisal))
