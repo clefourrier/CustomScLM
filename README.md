@@ -1,3 +1,1 @@
-https://huggingface.co/docs/transformers/main/en/model_doc/gpt2#transformers.GPT2Config
-
-Look at GPT2 config
+Work in progress, porting the ScLM model from https://github.com/IBM/transformers-struct-guidance to the transformers hub format
